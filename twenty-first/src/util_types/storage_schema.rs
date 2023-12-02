@@ -1667,4 +1667,350 @@ mod tests {
         // attempt to set 1 values, when two are in vector.
         vector.set_all(&[5]);
     }
+
+    pub mod concurrency {
+        use super::super::StorageVec;
+        use super::*;
+        use std::thread;
+
+        type TestVec = Arc<Mutex<DbtVec<RustyKey, RustyValue, Index, u64>>>;
+
+        // pub fn prepare_concurrency_test_singleton(singleton: &impl StorageSingleton<u64>) {
+        //     singleton.set(42);
+        // }
+
+        fn gen_concurrency_test_vecs(num: u8) -> Vec<TestVec> {
+            let opt = rusty_leveldb::in_memory();
+            let db = DB::open("test-database", opt.clone()).unwrap();
+            let mut rusty_storage = SimpleRustyStorage::new(db);
+
+            (0..num)
+                .map(|i| {
+                    let mut vec = rusty_storage
+                        .schema
+                        .new_vec::<Index, u64>(&format!("atomicity-test-vector #{}", i));
+                    for j in 0u64..300 {
+                        vec.push(j);
+                    }
+                    vec
+                })
+                .collect()
+        }
+
+        pub fn iter_all_eq<T: PartialEq>(iter: impl IntoIterator<Item = T>) -> bool {
+            let mut iter = iter.into_iter();
+            let first = match iter.next() {
+                Some(f) => f,
+                None => return true,
+            };
+            iter.all(|elem| elem == first)
+        }
+
+        // This test fails, which demonstrates that concurrent reads and writes
+        // to multiple DbtVec in a `DbtSchema` are not atomic when the DbtVec are
+        // individually shared between threads.
+        //
+        // This failure is expected (correct), but somewhat subtle and not
+        // immediately obvious if one is expecting atomic read/write guarantee
+        // across all `Tables` created by a single `DbtSchema` instance in all cases.
+        //
+        // The construction shared between threads is:
+        //   Vec <Arc<Mutex<  Arc<Mutex< DbtVec<u64> >> >> >
+        //
+        // Alternatively, these could be individually shared between threads:
+        //   <Arc<Mutex<  Arc<Mutex< DbtVec<u64> >> >>
+        //   <Arc<Mutex<  Arc<Mutex< DbtVec<u64> >> >>
+        //
+        // The test fails which demonstrates that this construction does NOT
+        // provide atomic read/write guarantee over multiple tables.
+        //
+        // Recommendations:
+        //  1. Improve the twenty-first API and doc-comments to discourage
+        //     this usage and facilitate/promote an atomic usage.
+        //  2. Audit neptune-core and triton-vm to ensure this usage does
+        //     not occur anywhere.
+        #[test]
+        pub fn multi_table_atomic_setmany_and_getmany_immutable() {
+            let num_vecs = 2;
+
+            use rand::{seq::SliceRandom, thread_rng};
+            let opt = rusty_leveldb::in_memory();
+            let db = DB::open("test-database", opt.clone()).unwrap();
+            let mut rusty_storage = SimpleRustyStorage::new(db);
+
+            let table_vecs = (0..num_vecs)
+                .map(|i| {
+                    let mut vec = rusty_storage
+                        .schema
+                        .new_vec::<Index, u64>(&format!("atomicity-test-vector #{}", i));
+                    for i in 0u64..300 {
+                        vec.push(i);
+                    }
+
+                    // StorageVec is impl'd on Arc<Mutex<DbtVec>>.  But StorageVec contains
+                    // `&self mut` methods, so an Arc<Mutex<DbtVec>> that calls a StorageVec
+                    // mutable method is not shareable between threads.  The solution is to
+                    // make these vecs Immutable by wrapping in extra Arc<Mutex>>
+                    // which allows them to be mutably shared between threads
+                    //
+                    // Note that this is what neptune-core actually does in practice!
+                    //
+                    // Note also that without doing this, DbtVec is unusable across threads!!
+                    // Double-locking is an inefficiency and code-smell.  The correct fix is
+                    // to change StorageVec mutable (set_*, push, pop) to take `&self` instead of
+                    // &mut self.  The refactored code does this.
+                    Arc::new(Mutex::new(vec))
+                })
+                .collect_vec();
+
+            let orig = table_vecs[0].lock().unwrap().get_all();
+            let modified: Vec<u64> = orig.iter().map(|_| 50).collect();
+
+            // note: all vecs have the same length and same values.
+            let indices: Vec<_> = (0..orig.len() as u64).collect();
+
+            // We loop X times, and for each loop we start a `gets` reader thread and a `sets`
+            // writer thread.  The data in all 3 vecs is identical at start of each iteration.
+            // The writer thread writes data to all 3 vecs in random order, and the reader thread
+            // reads from them in random order.  The reader thread checks that each vec is internally
+            // consistent and also that all 3 vecs match eachother.  If either check fails,
+            // we have inconsistency across `Dbtable`s and the test fails.
+            //
+            // Note: this test eventually fails even if tables are always written and read in the
+            // same order. However it fails *much* faster with a random order, typically in a
+            // few iterations.  For deterministic ordering, comment the two calls to vecs.shuffle()
+            for i in 0..10000 {
+                thread::scope(|s| {
+                    // Reader thread.  Calls get_many() on each DbtVec "table" reading all elements
+                    let gets = s.spawn(|| {
+                        let mut vecs = table_vecs.iter().collect_vec();
+                        vecs.shuffle(&mut thread_rng());
+
+                        let mut copies = vec![];
+                        for vec in vecs.iter() {
+
+                            // perform a read of all values
+                            let copy = (*vec).lock().unwrap().get_many(&indices);
+
+                            // We expect this assert can never fail.  It would mean an
+                            // individual DbtVec instance is internally inconsistent, but we know
+                            // all reads/writes are protected by a lock.
+                            assert!(
+                                copy == orig || copy == modified,
+                                "encountered inconsistent table read. data: {:?}",
+                                copy
+                            );
+
+                            copies.push(copy);
+                        }
+
+                        let sums: Vec<u64> = copies.iter().map(|f| f.iter().sum()).collect();
+
+                        // This assert tests that the two vecs have equal sums.  If not, then one
+                        // was changed by the writer thread in between our calls to get_many().
+                        //
+                        // With true atomic writes over multiple tables, this would never fail,
+                        // but in our setup it can because locks only exist over individual tables.
+                        assert!(
+                            iter_all_eq(sums.clone()),
+                            "in test iteration #{} encountered inconsistent read across tables:\n  sums: {:?}\n  data: {:?}",
+                            i,
+                            sums,
+                            copies
+                        );
+                    });
+
+                    // Writer thread.  Calls set_many() on each DbtVec "table" modifying all elements
+                    let sets = s.spawn(|| {
+                        let mut vecs = table_vecs.iter().collect_vec();
+                        vecs.shuffle(&mut thread_rng());
+
+                        for vec in vecs.iter() {
+                            vec.lock()
+                                .unwrap()
+                                .set_many(orig.iter().enumerate().map(|(k, _v)| (k as u64, 50u64)));
+                        }
+                    });
+                    gets.join().unwrap();
+                    sets.join().unwrap();
+
+                    // reset all values back to original state in each DbtVec/table.
+                    for vec in table_vecs.iter() {
+                        vec.lock().unwrap().set_all(&orig);
+                    }
+                });
+            }
+        }
+
+        // This test demonstrates that concurrent reads and writes
+        // to multiple DbtVec in a `DbtSchema` are atomic when
+        // a lock is placed around a collection holding all the `DbtVec`.
+        //
+        // The construction shared between threads is:
+        //   <Arc<Mutex<  Vec< Arc<Mutex< DbtVec<u64> >> > >>
+        //
+        // The test passes and demonstrates that this construction provides
+        // atomic read/write guarantee over multiple tables.
+        //
+        // It is recommended then, that twenty-first be enhanced to offer
+        // a simple API around this construction to document and facilitate
+        // its use and discourage (or even prevent?) the non-atomic use.
+        #[test]
+        pub fn multi_table_mutex_atomic_setmany_and_getmany() {
+            use rand::{seq::SliceRandom, thread_rng};
+
+            let table_vecs = gen_concurrency_test_vecs(2);
+            let locked_table_vecs = Arc::new(Mutex::new(table_vecs));
+
+            let orig = locked_table_vecs.lock().unwrap()[0].get_all();
+            let modified: Vec<u64> = orig.iter().map(|_| 50).collect();
+
+            // note: all vecs have the same length and same values.
+            let indices: Vec<_> = (0..orig.len() as u64).collect();
+
+            // this test should never fail.  we only loop 100 times to keep
+            // the test fast.  Bump it up to 10000+ temporarily to be extra certain.
+            thread::scope(|s| {
+                for _i in 0..100 {
+                    let gets = s.spawn(|| {
+                        let mut copies = vec![];
+                        for vec in locked_table_vecs.lock().unwrap().iter() {
+                            let copy = vec.get_many(&indices);
+                            thread::sleep(std::time::Duration::from_millis(1));
+
+                            assert!(
+                                copy == orig || copy == modified,
+                                "encountered inconsistent table read. data: {:?}",
+                                copy
+                            );
+
+                            copies.push(copy);
+                        }
+
+                        let sums: Vec<u64> = copies.iter().map(|f| f.iter().sum()).collect();
+                        assert!(
+                            iter_all_eq(sums.clone()),
+                            "encountered inconsistent read across tables:\n  sums: {:?}\n  data: {:?}",
+                            sums,
+                            copies
+                        );
+                        println!("sums: {:?}", sums);
+                    });
+
+                    let sets = s.spawn(|| {
+                        let mut lock = locked_table_vecs.lock().unwrap();
+
+                        let mut vecs = lock.iter_mut().collect_vec();
+                        vecs.shuffle(&mut thread_rng());
+
+                        for i in 0..vecs.len() {
+                            vecs.get_mut(i)
+                                .unwrap()
+                                .set_many(orig.iter().enumerate().map(|(k, _v)| (k as u64, 50u64)));
+                        }
+                    });
+                    gets.join().unwrap();
+                    sets.join().unwrap();
+
+                    println!("--- threads finished. restart. ---");
+
+                    for vec in locked_table_vecs.lock().unwrap().iter_mut() {
+                        vec.set_all(&orig);
+                    }
+                }
+            });
+        }
+
+        // This test fails to compile because Arc<Mutex<DbtVec<u64>>>
+        // cannot be shared beteen threads.  This is because
+        // Arc<Mutex<DbtVec<T>>> impl's StorageVec, which uses
+        // `&mut self` for all write operation methods.
+        //
+        // That is unnecessary, as Arc<Mutex<..>> is immutable, and indeed
+        // Rust guarantees/requires that only immutable `struct` can be
+        // safely passed between threads.
+        //
+        // In other words, this test that won't compile demonstrates
+        // how/why StorageVec trait needs to be modified to take only `&self`.
+        //
+        // Indeed, with that StorageVec change in place, the other two tests
+        // above would not need the outer Arc<Mutex< .. >> wrapper.
+
+        // #[test]
+        // pub fn multi_table_atomic_setmany_and_getmany_cannot_compile() {
+        //     let opt = rusty_leveldb::in_memory();
+        //     let db = DB::open("test-database", opt.clone()).unwrap();
+        //     let rusty_storage = Arc::new(Mutex::new(SimpleRustyStorage::new(db)));
+
+        //     let mut vecs = (0..2)
+        //         .map(|i| {
+        //             let mut vec = rusty_storage
+        //                 .lock()
+        //                 .unwrap()
+        //                 .schema
+        //                 .new_vec::<Index, u64>(&format!("atomicity-test-vector #{}", i));
+        //             for i in 0u64..300 {
+        //                 vec.push(i);
+        //             }
+        //             vec
+        //         })
+        //         .collect_vec();
+
+        //     let vec1 = vecs.pop().unwrap();
+        //     let vec2 = vecs.pop().unwrap();
+
+        //     let orig = vec1.get_all();
+        //     let modified: Vec<u64> = orig.iter().map(|_| 50).collect();
+
+        //     // note: all vecs have the same length and same values.
+        //     let indices: Vec<_> = (0..orig.len() as u64).collect();
+
+        //     // this test should never fail.  we only loop 100 times to keep
+        //     // the test fast.  Bump it up to 10000+ temporarily to be extra certain.
+        //     thread::scope(|s| {
+        //         for _i in 0..100 {
+        //             let gets = s.spawn(|| {
+        //                 let vecs = vec![&vec1, &vec2];
+        //                 let mut copies = vec![];
+        //                 for vec in vecs.iter() {
+
+        //                     let copy = (*vec).get_many(&indices);
+        //                     thread::sleep(std::time::Duration::from_millis(1));
+
+        //                     assert!(
+        //                         copy == orig || copy == modified,
+        //                         "encountered inconsistent table read. data: {:?}",
+        //                         copy
+        //                     );
+
+        //                     copies.push(copy);
+        //                 }
+
+        //                 let sums: Vec<u64> = copies.iter().map(|f| f.iter().sum()).collect();
+        //                 assert!(
+        //                     iter_all_eq(sums.clone()),
+        //                     "encountered inconsistent read across tables:\n  sums: {:?}\n  data: {:?}",
+        //                     sums,
+        //                     copies
+        //                 );
+        //                 println!("sums: {:?}", sums);
+        //             });
+
+        //             let sets = s.spawn(|| {
+        //                 // prevents test from compiling
+        //                 vec1.set_many(orig.iter().enumerate().map(|(k, _v)| (k as u64, 50u64)));
+        //                 vec2.set_many(orig.iter().enumerate().map(|(k, _v)| (k as u64, 50u64)));
+        //             });
+        //             gets.join().unwrap();
+        //             sets.join().unwrap();
+
+        //             println!("--- threads finished. restart. ---");
+
+        //             // prevents test from compiling
+        //             vec1.set_all(&orig);
+        //             vec2.set_all(&orig);
+        //         }
+        //     });
+        // }
+    }
 }
