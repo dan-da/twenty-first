@@ -5,7 +5,7 @@
 //! Thread-safe collection types backed by levelDB.
 //!
 //! In particular:
-//!  - [`RustyLevelDbVec`](storage_vec::RustyLevelDbVec) provides a database-backed Vec with
+//!  - [`OrdinaryVec`](storage_vec::OrdinaryVec) provides a database-backed Vec with
 //!    read/write cache and atomic writes.
 //!  - [`SimpleRustyStorage`](storage_schema::SimpleRustyStorage) provides atomic DB writes across
 //!    any number of [`DbtVec`](storage_schema::DbtVec) or [`DbtSingleton`](storage_schema::DbtSingleton) "tables".

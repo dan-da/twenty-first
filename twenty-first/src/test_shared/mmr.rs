@@ -5,28 +5,29 @@ use itertools::Itertools;
 use crate::shared_math::digest::Digest;
 use crate::shared_math::other::{log_2_ceil, random_elements};
 use crate::storage::level_db::DB;
-use crate::storage::storage_vec::RustyLevelDbVec;
+use crate::storage::storage_vec::OrdinaryVec;
 use crate::util_types::mmr::mmr_accumulator::MmrAccumulator;
 use crate::util_types::mmr::mmr_membership_proof::MmrMembershipProof;
 use crate::util_types::mmr::shared_advanced::right_lineage_length_from_node_index;
 use crate::util_types::mmr::shared_basic::{self, leaf_index_to_mt_index_and_peak_index};
-use crate::util_types::{algebraic_hasher::AlgebraicHasher, mmr::archival_mmr::ArchivalMmr};
+//use crate::util_types::{algebraic_hasher::AlgebraicHasher, mmr::archival_mmr::StorageMmr};
+use crate::util_types::algebraic_hasher::AlgebraicHasher;
+use crate::util_types::mmr::storage_mmr::StorageMmr;
 use crate::utils::has_unique_elements;
 
 /// Return an empty in-memory archival MMR for testing purposes.
 /// Does *not* have a unique ID, so you can't expect multiple of these
 /// instances to behave independently unless you understand the
 /// underlying data structure.
-pub fn get_empty_rustyleveldb_ammr<H: AlgebraicHasher>() -> ArchivalMmr<H, RustyLevelDbVec<Digest>>
-{
-    let db = DB::open_new_test_database(true, None, None, None).unwrap();
-    let pv = RustyLevelDbVec::new(db, 0, "AMMR for unit tests");
-    ArchivalMmr::new(pv)
+pub fn get_empty_rustyleveldb_ammr<H: AlgebraicHasher>() -> StorageMmr<H, OrdinaryVec<Digest>> {
+    let _db = DB::open_new_test_database(true, None, None, None).unwrap();
+    let pv: OrdinaryVec<Digest> = Default::default();
+    StorageMmr::new(pv)
 }
 
 pub fn get_rustyleveldb_ammr_from_digests<H>(
     digests: Vec<Digest>,
-) -> ArchivalMmr<H, RustyLevelDbVec<Digest>>
+) -> StorageMmr<H, OrdinaryVec<Digest>>
 where
     H: AlgebraicHasher,
 {
