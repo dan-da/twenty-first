@@ -7,38 +7,12 @@ use std::{collections::HashMap, fmt::Debug};
 use super::mmr_membership_proof::MmrMembershipProof;
 use super::mmr_trait::Mmr;
 use super::shared_basic;
-use super::storage_mmr::StorageMmr;
 use crate::shared_math::bfield_codec::BFieldCodec;
 use crate::shared_math::digest::Digest;
-use crate::storage::storage_vec::traits::StorageVec;
 use crate::util_types::algebraic_hasher::AlgebraicHasher;
 use crate::util_types::mmr::shared_advanced;
 use crate::util_types::shared::bag_peaks;
 use crate::utils::has_unique_elements;
-
-impl<H: AlgebraicHasher, Storage: StorageVec<Digest>> From<StorageMmr<H, Storage>>
-    for MmrAccumulator<H>
-{
-    fn from(ammr: StorageMmr<H, Storage>) -> Self {
-        MmrAccumulator {
-            leaf_count: ammr.count_leaves(),
-            peaks: ammr.get_peaks(),
-            _hasher: PhantomData,
-        }
-    }
-}
-
-impl<H: AlgebraicHasher, Storage: StorageVec<Digest>> From<&StorageMmr<H, Storage>>
-    for MmrAccumulator<H>
-{
-    fn from(ammr: &StorageMmr<H, Storage>) -> Self {
-        MmrAccumulator {
-            leaf_count: ammr.count_leaves(),
-            peaks: ammr.get_peaks(),
-            _hasher: PhantomData,
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, GetSize, BFieldCodec, Arbitrary)]
 pub struct MmrAccumulator<H>
@@ -313,26 +287,44 @@ mod accumulator_mmr_tests {
     use crate::shared_math::other::{random_elements, random_elements_range};
     use crate::shared_math::tip5::Tip5;
 
-    use crate::test_shared::mmr::get_rustyleveldb_ammr_from_digests;
-    use crate::util_types::mmr::storage_mmr::StorageMmr;
-    use crate::util_types::storage_vec::OrdinaryVec;
+    use crate::mock::mmr::get_mock_ammr_from_digests;
+    use crate::mock::mmr::MockMmr;
 
     use super::*;
+
+    impl<H: AlgebraicHasher> From<MockMmr<H>> for MmrAccumulator<H> {
+        fn from(ammr: MockMmr<H>) -> Self {
+            MmrAccumulator {
+                leaf_count: ammr.count_leaves(),
+                peaks: ammr.get_peaks(),
+                _hasher: PhantomData,
+            }
+        }
+    }
+
+    impl<H: AlgebraicHasher> From<&MockMmr<H>> for MmrAccumulator<H> {
+        fn from(ammr: &MockMmr<H>) -> Self {
+            MmrAccumulator {
+                leaf_count: ammr.count_leaves(),
+                peaks: ammr.get_peaks(),
+                _hasher: PhantomData,
+            }
+        }
+    }
 
     #[test]
     fn conversion_test() {
         type H = blake3::Hasher;
 
         let leaf_hashes: Vec<Digest> = random_elements(3);
-        let storage_mmr: StorageMmr<H, OrdinaryVec<Digest>> =
-            get_rustyleveldb_ammr_from_digests(leaf_hashes);
-        let accumulator_mmr = MmrAccumulator::from(storage_mmr.clone());
+        let mock_mmr: MockMmr<H> = get_mock_ammr_from_digests(leaf_hashes);
+        let accumulator_mmr = MmrAccumulator::from(mock_mmr.clone());
 
-        assert_eq!(storage_mmr.get_peaks(), accumulator_mmr.get_peaks());
-        assert_eq!(storage_mmr.bag_peaks(), accumulator_mmr.bag_peaks());
-        assert_eq!(storage_mmr.is_empty(), accumulator_mmr.is_empty());
-        assert!(!storage_mmr.is_empty());
-        assert_eq!(storage_mmr.count_leaves(), accumulator_mmr.count_leaves());
+        assert_eq!(mock_mmr.get_peaks(), accumulator_mmr.get_peaks());
+        assert_eq!(mock_mmr.bag_peaks(), accumulator_mmr.bag_peaks());
+        assert_eq!(mock_mmr.is_empty(), accumulator_mmr.is_empty());
+        assert!(!mock_mmr.is_empty());
+        assert_eq!(mock_mmr.count_leaves(), accumulator_mmr.count_leaves());
         assert_eq!(3, accumulator_mmr.count_leaves());
     }
 
@@ -371,8 +363,7 @@ mod accumulator_mmr_tests {
 
         let accumulator_mmr_start: MmrAccumulator<H> =
             MmrAccumulator::new(leaf_hashes_start.clone());
-        let archive_mmr_start: StorageMmr<H, OrdinaryVec<Digest>> =
-            get_rustyleveldb_ammr_from_digests(leaf_hashes_start);
+        let archive_mmr_start: MockMmr<H> = get_mock_ammr_from_digests(leaf_hashes_start);
         let membership_proof = archive_mmr_start.prove_membership(3).0;
         let accumulator_mmr_end: MmrAccumulator<H> = MmrAccumulator::new(leaf_hashes_end);
 
@@ -433,8 +424,7 @@ mod accumulator_mmr_tests {
 
         let accumulator_mmr_start: MmrAccumulator<H> =
             MmrAccumulator::<H>::new(leaf_hashes_start.clone());
-        let archive_mmr_start: StorageMmr<H, OrdinaryVec<Digest>> =
-            get_rustyleveldb_ammr_from_digests(leaf_hashes_start);
+        let archive_mmr_start: MockMmr<H> = get_mock_ammr_from_digests(leaf_hashes_start);
         let membership_proof1 = archive_mmr_start.prove_membership(1).0;
         let membership_proof3 = archive_mmr_start.prove_membership(3).0;
         let accumulator_mmr_end: MmrAccumulator<H> = MmrAccumulator::new(leaf_hashes_end);
@@ -457,10 +447,9 @@ mod accumulator_mmr_tests {
             let initial_leaf_digests: Vec<Digest> = random_elements(mmr_leaf_count);
 
             let mut mmra: MmrAccumulator<H> = MmrAccumulator::new(initial_leaf_digests.clone());
-            let mut ammr: StorageMmr<H, OrdinaryVec<Digest>> =
-                get_rustyleveldb_ammr_from_digests(initial_leaf_digests.clone());
-            let mut ammr_copy: StorageMmr<H, OrdinaryVec<Digest>> =
-                get_rustyleveldb_ammr_from_digests(initial_leaf_digests.clone());
+            let mut ammr: MockMmr<H> = get_mock_ammr_from_digests(initial_leaf_digests.clone());
+            let mut ammr_copy: MockMmr<H> =
+                get_mock_ammr_from_digests(initial_leaf_digests.clone());
 
             let mutated_leaf_count = rng.gen_range(0..mmr_leaf_count);
             let all_indices: Vec<u64> = (0..mmr_leaf_count as u64).collect();
@@ -565,13 +554,11 @@ mod accumulator_mmr_tests {
                 .map(|x| local_hash(x as u128))
                 .collect();
 
-            let bad_mmr: StorageMmr<H, OrdinaryVec<Digest>> =
-                get_rustyleveldb_ammr_from_digests(bad_digests.clone());
+            let bad_mmr: MockMmr<H> = get_mock_ammr_from_digests(bad_digests.clone());
             let bad_membership_proof: MmrMembershipProof<H> = bad_mmr.prove_membership(0).0;
             let bad_membership_proof_digest = bad_digests[0];
             let bad_leaf: Digest = local_hash(8765432165123u128);
-            let storage_mmr_init: StorageMmr<H, OrdinaryVec<Digest>> =
-                get_rustyleveldb_ammr_from_digests(leaf_hashes_start.clone());
+            let mock_mmr_init: MockMmr<H> = get_mock_ammr_from_digests(leaf_hashes_start.clone());
             let accumulator_mmr = MmrAccumulator::<H>::new(leaf_hashes_start.clone());
 
             for append_size in 0..18 {
@@ -601,12 +588,12 @@ mod accumulator_mmr_tests {
                         leaf_hashes_mutated.push(appended_digest.to_owned());
                     }
 
-                    // let mutated_storage_mmr =
-                    //     StorageMmr::<Hasher>::new(leaf_hashes_mutated.clone());
-                    let mutated_storage_mmr: StorageMmr<H, OrdinaryVec<Digest>> =
-                        get_rustyleveldb_ammr_from_digests(leaf_hashes_mutated.clone());
+                    // let mutated_mock_mmr =
+                    //     MockMmr::<Hasher>::new(leaf_hashes_mutated.clone());
+                    let mutated_mock_mmr: MockMmr<H> =
+                        get_mock_ammr_from_digests(leaf_hashes_mutated.clone());
                     let mutated_accumulator_mmr = MmrAccumulator::<H>::new(leaf_hashes_mutated);
-                    let expected_new_peaks_from_archival = mutated_storage_mmr.get_peaks();
+                    let expected_new_peaks_from_archival = mutated_mock_mmr.get_peaks();
                     let expected_new_peaks_from_accumulator = mutated_accumulator_mmr.get_peaks();
                     assert_eq!(
                         expected_new_peaks_from_archival,
@@ -616,7 +603,7 @@ mod accumulator_mmr_tests {
                     // Create the inputs to the method call
                     let membership_proofs = mutated_indices
                         .iter()
-                        .map(|&i| storage_mmr_init.prove_membership(i).0);
+                        .map(|&i| mock_mmr_init.prove_membership(i).0);
                     let mut leaf_mutations: Vec<(Digest, MmrMembershipProof<H>)> = new_leaf_values
                         .clone()
                         .into_iter()
@@ -627,7 +614,7 @@ mod accumulator_mmr_tests {
                         &appends,
                         &leaf_mutations
                     ));
-                    assert!(storage_mmr_init.verify_batch_update(
+                    assert!(mock_mmr_init.verify_batch_update(
                         &expected_new_peaks_from_accumulator,
                         &appends,
                         &leaf_mutations

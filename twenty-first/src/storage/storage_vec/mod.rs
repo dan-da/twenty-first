@@ -10,16 +10,14 @@
 mod iterators;
 pub mod traits;
 
-#[cfg(test)]
-mod ordinary_vec;
-#[cfg(test)]
-mod ordinary_vec_private;
-
 pub type Index = u64;
-
 pub use iterators::*;
 
-#[cfg(test)]
+// note: we keep ordinary_vec around because it is
+// used in DocTest examples, as it does not require DB.
+
+mod ordinary_vec;
+mod ordinary_vec_private;
 pub use ordinary_vec::*;
 
 #[cfg(test)]
@@ -31,14 +29,6 @@ mod tests {
     use itertools::Itertools;
     use rand::{Rng, RngCore};
     use std::collections::HashMap;
-
-    //  pub(super) fn get_test_db(destroy_db_on_drop: bool) -> DB {
-    //     DB::open_new_test_database(destroy_db_on_drop, None, None, None).unwrap()
-    // }
-
-    // fn open_test_db(path: &std::path::Path, destroy_db_on_drop: bool) -> DB {
-    //     DB::open_test_database(path, destroy_db_on_drop, None, None, None).unwrap()
-    // }
 
     /// Return a persisted vector and a regular in-memory vector with the same elements
     fn get_persisted_vec_with_length(length: Index, _name: &str) -> (OrdinaryVec<u64>, Vec<u64>) {

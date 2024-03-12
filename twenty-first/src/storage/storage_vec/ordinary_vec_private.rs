@@ -8,11 +8,13 @@ impl<T: Clone> StorageVecLockedData<T> for OrdinaryVecPrivate<T> {
     fn get(&self, index: Index) -> T {
         self.0
             .get(index as usize)
-            .expect(&format!(
-                "Out-of-bounds. Got index {} but length was {}.",
-                index,
-                self.0.len(),
-            ))
+            .unwrap_or_else(|| {
+                panic!(
+                    "Out-of-bounds. Got index {} but length was {}.",
+                    index,
+                    self.0.len(),
+                )
+            })
             .clone()
     }
 

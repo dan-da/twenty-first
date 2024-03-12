@@ -9,8 +9,8 @@ pub mod timing_reporter;
 pub mod util_types;
 pub mod utils;
 
-#[cfg(test)]
-pub mod test_shared;
+#[cfg(any(test, feature = "mock"))]
+pub mod mock;
 
 // This is needed for `#[derive(BFieldCodec)]` macro to work consistently across crates.
 // Specifically:
