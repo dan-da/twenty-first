@@ -27,7 +27,7 @@ use serde::Deserializer;
 use serde::Serialize;
 use serde::Serializer;
 
-use crate::error::ParseBFieldElementError;
+use crate::error::TryFromBFieldElementError;
 use crate::math::traits::CyclicGroupGenerator;
 use crate::math::traits::FiniteField;
 use crate::math::traits::ModPowU32;
@@ -226,6 +226,10 @@ impl BFieldElement {
     }
 
     #[inline]
+    pub const fn is_canonical(x: u64) -> bool {
+        x < Self::P
+    }
+
     /// Square the base M times and multiply the result by the tail value
     pub const fn power_accumulator<const N: usize, const M: usize>(
         base: [Self; N],
@@ -383,7 +387,7 @@ impl fmt::Display for BFieldElement {
 }
 
 impl FromStr for BFieldElement {
-    type Err = ParseBFieldElementError;
+    type Err = TryFromBFieldElementError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let parsed = s.parse().map_err(Self::Err::ParseU64Error)?;
@@ -454,10 +458,22 @@ impl From<BFieldElement> for [u8; BFieldElement::BYTES] {
     }
 }
 
-impl From<[u8; BFieldElement::BYTES]> for BFieldElement {
-    fn from(array: [u8; BFieldElement::BYTES]) -> Self {
-        let n = u64::from_le_bytes(array);
-        BFieldElement::new(n)
+// impl From<[u8; BFieldElement::BYTES]> for BFieldElement {
+//     fn from(array: [u8; BFieldElement::BYTES]) -> Self {
+//         let n = u64::from_le_bytes(array);
+//         BFieldElement::new(n)
+//     }
+// }
+
+impl TryFrom<[u8; BFieldElement::BYTES]> for BFieldElement {
+    type Error = TryFromBFieldElementError;
+// impl BFieldElement {
+    fn try_from(bytes: [u8; BFieldElement::BYTES]) -> Result<Self, TryFromBFieldElementError> {
+        let n = u64::from_le_bytes(bytes);
+        match Self::is_canonical(n) {
+            true => Ok(BFieldElement::new(n)),
+            false => Err(TryFromBFieldElementError::NotCanonical),
+        }
     }
 }
 
@@ -1297,5 +1313,17 @@ mod b_prime_field_element_test {
     #[proptest]
     fn bfe_macro_produces_same_result_as_calling_new(value: u64) {
         prop_assert_eq!(BFieldElement::new(value), bfe!(value));
+    }
+
+    // note: for background on this test, see:
+    //       https://github.com/Neptune-Crypto/twenty-first/issues/195
+    #[test]
+    fn try_from_not_canonical() -> Result<(), TryFromBFieldElementError> {
+        let bytes: [u8; BFieldElement::BYTES] = [255; BFieldElement::BYTES];
+
+        assert!(BFieldElement::try_from(bytes)
+            .is_err_and(|e| matches!(e, TryFromBFieldElementError::NotCanonical)));
+
+        Ok(())
     }
 }
